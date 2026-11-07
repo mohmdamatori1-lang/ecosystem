@@ -9,35 +9,32 @@
 #include <arpa/inet.h>
 using namespace std;
 
-// void recv_message(){
-//     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+void recv_message(){
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
 
-//     int yes = 1;
-//     setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    int yes = 1;
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-//     sockaddr_in serverAddress{};
-//     serverAddress.sin_family = AF_INET;
-//     serverAddress.sin_port = htons(8080);
-//     serverAddress.sin_addr.s_addr = INADDR_ANY;
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
 
-//     bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
-//     listen(serverSocket, 5);
+    bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
+    listen(serverSocket, 5);
 
-//     int clientSocket = accept(serverSocket, nullptr, nullptr);
+    int clientSocket = accept(serverSocket, nullptr, nullptr);
 
-//     char buffer[1024] = { 0 };
-//     ssize_t n = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-//     if (n > 0) {
-//         buffer[n] = '\0';
-//         cerr << "Message from client: " << buffer << "\n";
-//     }
+    char buffer[1024] = { 0 };
+    ssize_t n = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    if (n > 0) {
+        buffer[n] = '\0';
+        cerr << "Message from client: " << buffer << "\n";
+    }
 
-//     close(clientSocket);
-//     close(serverSocket);
-// }
-
-
-
+    close(clientSocket);
+    close(serverSocket);
+}
 
 void announce(){
     int serverSocket = socket(AF_INET, SOCK_DGRAM,0);
@@ -58,5 +55,5 @@ void announce(){
 
 int main(){
     thread(announce).detach();
-    while (true) sleep(1); 
+    recv_message();
 }
