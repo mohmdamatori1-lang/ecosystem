@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <arpa/inet.h>
+#include <filesystem>
 
 using namespace std;
 
@@ -27,7 +28,7 @@ void announce(){
     }
 }
 
-void recv_file(const string& output_filepath) {
+void recv_file() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int yes = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -36,8 +37,9 @@ void recv_file(const string& output_filepath) {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(8080);
+    
+    // [EDITED]: Removed broken line: string& output_filepath = ;
 
-    // FIX: Bind the socket before listening
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         cerr << "Bind failed\n";
         close(server_fd);
@@ -48,10 +50,27 @@ void recv_file(const string& output_filepath) {
     cout << "Server listening for incoming file on port 8080...\n";
 
     int addrlen = sizeof(address);
-    // FIX: Keep socket open and accept incoming client connection
+
     int client_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
     if (client_socket < 0) {
         cerr << "Accept failed\n";
+        close(server_fd);
+        return;
+    }
+
+    // [EDITED]: Read filename length and filename string from socket
+    uint32_t filename_len = 0;
+    ssize_t len_bytes = read(client_socket, &filename_len, sizeof(filename_len));
+    if (len_bytes <= 0) {
+        close(client_socket);
+        close(server_fd);
+        return;
+    }
+
+    string output_filepath(filename_len, '\0');
+    ssize_t name_bytes = read(client_socket, &output_filepath[0], filename_len);
+    if (name_bytes <= 0) {
+        close(client_socket);
         close(server_fd);
         return;
     }
@@ -98,12 +117,38 @@ void recv_file(const string& output_filepath) {
 
     cout << "\nFile successfully received and saved to " << output_filepath << "\n";
 
-    // FIX: Close sockets only after transfer completes
     close(client_socket);
     close(server_fd);
 }
 
+void recv_message(){
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+
+    int yes = 1;
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
+
+    bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
+    listen(serverSocket, 5);
+
+    int clientSocket = accept(serverSocket, nullptr, nullptr);
+
+    char buffer[1024] = { 0 };
+    ssize_t n = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    if (n > 0) {
+        buffer[n] = '\0';
+        cerr << "Message from client: " << buffer << "\n";
+    }
+
+    close(clientSocket);
+    close(serverSocket);
+}
+
 int main(){
     thread(announce).detach();
-    recv_file("received_file.bin");
+    recv_file();
 }

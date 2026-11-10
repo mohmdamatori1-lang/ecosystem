@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <vector>
 #include <string>
+#include <filesystem>
 
 using namespace std;
 
@@ -41,6 +42,7 @@ string findServer(){
 }
 
 void send_file(const string& filepath){
+    // files between 1mb to 200mb max
     string ip = findServer();
     if (ip.empty()) {
         cerr << "No server found via multicast.\n";
@@ -74,7 +76,11 @@ void send_file(const string& filepath){
     streamsize file_size = file.tellg();
     file.seekg(0, ios::beg);
 
-    // Send file size metadata first
+    string filename = std::filesystem::path(filepath).filename().string();
+    uint32_t filename_len = filename.size();
+    send(clientSocket, &filename_len, sizeof(filename_len), 0);
+    send(clientSocket, filename.c_str(), filename_len, 0);
+
     send(clientSocket, &file_size, sizeof(file_size), 0);
 
     char buffer[8192];
@@ -94,15 +100,34 @@ void send_file(const string& filepath){
 
     cout << "\nFile transfer complete. Total sent: " << total_sent << " bytes\n";
     
-    // Close socket only after everything is sent
     close(clientSocket);
 }
+
+void send_message(){
+
+
+    string ip = findServer();
+
+    int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_addr.s_addr = inet_addr(ip.c_str());
+    connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
+
+    string message_from_user;
+    cout << "message : " ;
+    getline(cin, message_from_user);
+    send(clientSocket, message_from_user.c_str(), message_from_user.size(), 0);
+    close(clientSocket);
+}
+
+
 
 int main(){
     string filepath;
     cout << "file path: ";
-    cin >> filepath;
-
+    cin >> filepath ;
 
     send_file(filepath);
 }
