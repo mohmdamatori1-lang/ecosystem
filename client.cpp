@@ -1,17 +1,107 @@
+#include <QApplication>
+#include <QMainWindow>
+#include <QTabWidget>
+#include <QWidget>
+#include <QVBoxLayout>
+#include <QListWidget>
+#include <QPushButton>
+#include <QLabel>
+#include <QFileDialog>
+#include <QMessageBox>
+
+// --- Backend Networking Headers ---
 #include <cstring>
 #include <iostream>
 #include <fstream>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
 #include <arpa/inet.h>
-#include <vector>
-#include <string>
 #include <filesystem>
 
 using namespace std;
 
-string findServer(){
+
+void announce_server() {
+    int serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    int ttl = 1;
+    setsockopt(serverSocket, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+    sockaddr_in serverAddress{};
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(53317);
+    inet_pton(AF_INET, "224.0.0.167", &serverAddress.sin_addr);
+
+    while(true) {
+        sendto(serverSocket, "SERVER", 6, 0, (sockaddr*)&serverAddress, sizeof(serverAddress));
+        this_thread::sleep_for(chrono::seconds(2));
+    }
+}
+
+void start_receiver_loop() {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int yes = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(8080);
+
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        close(server_fd);
+        return;
+    }
+    listen(server_fd, 3);
+
+    while(true) {
+        int addrlen = sizeof(address);
+        int client_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
+        if (client_socket < 0) continue;
+
+        uint32_t filename_len = 0;
+        if (read(client_socket, &filename_len, sizeof(filename_len)) <= 0) {
+            close(client_socket);
+            continue;
+        }
+
+        string output_filepath(filename_len, '\0');
+        if (read(client_socket, &output_filepath[0], filename_len) <= 0) {
+            close(client_socket);
+            continue;
+        }
+
+        int64_t file_size = 0;
+        if (read(client_socket, &file_size, sizeof(file_size)) <= 0) {
+            close(client_socket);
+            continue;
+        }
+
+        ofstream outfile(output_filepath, ios::binary);
+        if (!outfile.is_open()) {
+            close(client_socket);
+            continue;
+        }
+
+        char buffer[8192];
+        int64_t total_received = 0;
+        while (total_received < file_size) {
+            int64_t bytes_to_read = sizeof(buffer);
+            if (file_size - total_received < bytes_to_read) {
+                bytes_to_read = file_size - total_received;
+            }
+            ssize_t bytes_received = read(client_socket, buffer, bytes_to_read);
+            if (bytes_received <= 0) break;
+            outfile.write(buffer, bytes_received);
+            total_received += bytes_received;
+        }
+        close(client_socket);
+    }
+}
+
+string findServer() {
     int serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
     int yes = 1;
     setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -41,20 +131,12 @@ string findServer(){
     return string(ip);
 }
 
-void send_file(const string& filepath){
-    // files between 1mb to 200mb max
+void send_file_backend(const string& filepath) {
     string ip = findServer();
-    if (ip.empty()) {
-        cerr << "No server found via multicast.\n";
-        return;
-    }
-    cerr << "Found server at " << ip << "\n";
+    if (ip.empty()) return;
 
     int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (clientSocket < 0) {
-        cerr << "Socket creation failed\n";
-        return;
-    }
+    if (clientSocket < 0) return;
 
     sockaddr_in serverAddress{};
     serverAddress.sin_family = AF_INET;
@@ -62,14 +144,12 @@ void send_file(const string& filepath){
     serverAddress.sin_addr.s_addr = inet_addr(ip.c_str());
 
     if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
-        cerr << "Connection to server failed.\n";
         close(clientSocket);
         return;
     }
 
     ifstream file(filepath, ios::binary | ios::ate);
     if (!file.is_open()){
-        cerr << "File not found: " << filepath << "\n";
         close(clientSocket);
         return;
     }
@@ -80,54 +160,136 @@ void send_file(const string& filepath){
     uint32_t filename_len = filename.size();
     send(clientSocket, &filename_len, sizeof(filename_len), 0);
     send(clientSocket, filename.c_str(), filename_len, 0);
-
     send(clientSocket, &file_size, sizeof(file_size), 0);
 
     char buffer[8192];
-    streamsize total_sent = 0;
-
     while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0 ){
         streamsize bytes_to_send = file.gcount();
-        ssize_t bytes_sent = send(clientSocket, buffer, bytes_to_send, 0);
-        if (bytes_sent < 0) {
-            cerr << "Error sending file chunk.\n";
-            break;
-        }
-        total_sent += bytes_sent;        
-        int progress = (total_sent * 100) / file_size;
-        cout << "\rProgress: " << progress << "%" << flush;
+        send(clientSocket, buffer, bytes_to_send, 0);
     }
 
-    cout << "\nFile transfer complete. Total sent: " << total_sent << " bytes\n";
-    
     close(clientSocket);
 }
 
-void send_message(){
+// =========================================================================
+// 2. This is front end
+// =========================================================================
+class AppleEcosystemApp : public QMainWindow {
+public:
+    AppleEcosystemApp(QWidget *parent = nullptr) : QMainWindow(parent) {
+        setupUI();
+        initConnections();
 
+        // تشغيل الخدمات في الخلفية
+        std::thread(announce_server).detach();
+        std::thread(start_receiver_loop).detach();
+    }
 
-    string ip = findServer();
+private:
+    void handleScanClicked() {
+        deviceList->clear();
+        deviceList->addItem("Scanning network...");
+        refreshButton->setEnabled(false);
 
-    int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in serverAddress{};
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(8080);
-    serverAddress.sin_addr.s_addr = inet_addr(ip.c_str());
-    connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
+        std::thread([this]() {
+            string foundIp = findServer();
 
-    string message_from_user;
-    cout << "message : " ;
-    getline(cin, message_from_user);
-    send(clientSocket, message_from_user.c_str(), message_from_user.size(), 0);
-    close(clientSocket);
-}
+            QMetaObject::invokeMethod(this, [this, foundIp]() {
+                deviceList->clear();
+                if (!foundIp.empty()) {
+                    deviceList->addItem(QString::fromStdString("Server found at: " + foundIp));
+                } else {
+                    deviceList->addItem("No servers found.");
+                }
+                refreshButton->setEnabled(true);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
 
+    void handleSelectFile() {
+        QString filePath = QFileDialog::getOpenFileName(this, "Select File");
+        if (!filePath.isEmpty()) {
+            selectedFilePath = filePath;
+            fileStatusLabel->setText("File: " + filePath);
+            sendButton->setEnabled(true);
+        }
+    }
 
+    void handleSendFile() {
+        if (selectedFilePath.isEmpty()) return;
 
-int main(){
-    string filepath;
-    cout << "file path: ";
-    cin >> filepath ;
+        string pathToSend = selectedFilePath.toStdString();
+        fileStatusLabel->setText("Sending...");
+        sendButton->setEnabled(false);
 
-    send_file(filepath);
+        std::thread([this, pathToSend]() {
+            send_file_backend(pathToSend);
+
+            QMetaObject::invokeMethod(this, [this]() {
+                QMessageBox::information(this, "Done", "File sent successfully!");
+                fileStatusLabel->setText("No file selected.");
+                sendButton->setEnabled(false);
+                selectedFilePath.clear();
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    QTabWidget *tabWidget;
+    QListWidget *deviceList;
+    QPushButton *refreshButton;
+    QPushButton *selectFileButton;
+    QPushButton *sendButton;
+    QLabel *fileStatusLabel;
+    QString selectedFilePath;
+
+    void setupUI() {
+        setWindowTitle("Ecosystem App");
+        resize(500, 350);
+
+        tabWidget = new QTabWidget(this);
+
+        QWidget *deviceTab = new QWidget();
+        QVBoxLayout *deviceLayout = new QVBoxLayout(deviceTab);
+        deviceLayout->setContentsMargins(15, 15, 15, 15);
+        deviceLayout->setSpacing(10);
+
+        deviceList = new QListWidget(deviceTab);
+        refreshButton = new QPushButton("Scan", deviceTab);
+
+        deviceLayout->addWidget(deviceList);
+        deviceLayout->addWidget(refreshButton);
+
+        QWidget *fileTab = new QWidget();
+        QVBoxLayout *fileLayout = new QVBoxLayout(fileTab);
+        fileLayout->setContentsMargins(15, 15, 15, 15);
+        fileLayout->setSpacing(10);
+
+        fileStatusLabel = new QLabel("No file selected.", fileTab);
+        selectFileButton = new QPushButton("Browse...", fileTab);
+        sendButton = new QPushButton("Send", fileTab);
+        sendButton->setEnabled(false);
+
+        fileLayout->addWidget(selectFileButton);
+        fileLayout->addWidget(fileStatusLabel);
+        fileLayout->addWidget(sendButton);
+        fileLayout->addStretch();
+
+        tabWidget->addTab(deviceTab, "Devices");
+        tabWidget->addTab(fileTab, "Transfer");
+
+        setCentralWidget(tabWidget);
+    }
+
+    void initConnections() {
+        connect(refreshButton, &QPushButton::clicked, this, &AppleEcosystemApp::handleScanClicked);
+        connect(selectFileButton, &QPushButton::clicked, this, &AppleEcosystemApp::handleSelectFile);
+        connect(sendButton, &QPushButton::clicked, this, &AppleEcosystemApp::handleSendFile);
+    }
+};
+
+int main(int argc, char *argv[]) {
+    QApplication app(argc, argv);
+    AppleEcosystemApp window;
+    window.show();
+    return app.exec();
 }
