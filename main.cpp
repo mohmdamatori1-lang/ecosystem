@@ -9,25 +9,42 @@
 #include <QFileDialog>
 #include <QMessageBox>
 
-// --- Backend Networking Headers ---
 #include <cstring>
 #include <iostream>
 #include <fstream>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <thread>
 #include <chrono>
-#include <arpa/inet.h>
 #include <filesystem>
+
+#if defined(_WIN32)
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "Ws2_32.lib")
+    typedef int socklen_t;
+    #define CLOSE_SOCKET closesocket
+    #define SOCKET_T SOCKET
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <netdb.h>
+    #define CLOSE_SOCKET close
+    #define SOCKET_T int
+    #define INVALID_SOCKET -1
+    #define SOCKET_ERROR -1
+#endif
+
+#if defined(Q_OS_ANDROID)
+#include <QJniObject>
+#endif
 
 using namespace std;
 
-
 void announce_server() {
-    int serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    SOCKET_T serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
     int ttl = 1;
-    setsockopt(serverSocket, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+    setsockopt(serverSocket, IPPROTO_IP, IP_MULTICAST_TTL, (char*)&ttl, sizeof(ttl));
 
     sockaddr_in serverAddress{};
     serverAddress.sin_family = AF_INET;
@@ -41,9 +58,9 @@ void announce_server() {
 }
 
 void start_receiver_loop() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    SOCKET_T server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int yes = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -51,37 +68,37 @@ void start_receiver_loop() {
     address.sin_port = htons(8080);
 
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        close(server_fd);
+        CLOSE_SOCKET(server_fd);
         return;
     }
     listen(server_fd, 3);
 
     while(true) {
-        int addrlen = sizeof(address);
-        int client_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
-        if (client_socket < 0) continue;
+        socklen_t addrlen = sizeof(address);
+        SOCKET_T client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
+        if (client_socket == INVALID_SOCKET) continue;
 
         uint32_t filename_len = 0;
-        if (read(client_socket, &filename_len, sizeof(filename_len)) <= 0) {
-            close(client_socket);
+        if (recv(client_socket, (char*)&filename_len, sizeof(filename_len), 0) <= 0) {
+            CLOSE_SOCKET(client_socket);
             continue;
         }
 
         string output_filepath(filename_len, '\0');
-        if (read(client_socket, &output_filepath[0], filename_len) <= 0) {
-            close(client_socket);
+        if (recv(client_socket, &output_filepath[0], filename_len, 0) <= 0) {
+            CLOSE_SOCKET(client_socket);
             continue;
         }
 
         int64_t file_size = 0;
-        if (read(client_socket, &file_size, sizeof(file_size)) <= 0) {
-            close(client_socket);
+        if (recv(client_socket, (char*)&file_size, sizeof(file_size), 0) <= 0) {
+            CLOSE_SOCKET(client_socket);
             continue;
         }
 
         ofstream outfile(output_filepath, ios::binary);
         if (!outfile.is_open()) {
-            close(client_socket);
+            CLOSE_SOCKET(client_socket);
             continue;
         }
 
@@ -92,21 +109,27 @@ void start_receiver_loop() {
             if (file_size - total_received < bytes_to_read) {
                 bytes_to_read = file_size - total_received;
             }
-            ssize_t bytes_received = read(client_socket, buffer, bytes_to_read);
+            int bytes_received = recv(client_socket, buffer, (int)bytes_to_read, 0);
             if (bytes_received <= 0) break;
             outfile.write(buffer, bytes_received);
             total_received += bytes_received;
         }
-        close(client_socket);
+        CLOSE_SOCKET(client_socket);
     }
 }
 
 string findServer() {
-    int serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    SOCKET_T serverSocket = socket(AF_INET, SOCK_DGRAM, 0);
     int yes = 1;
-    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
+    
+#if defined(_WIN32)
+    DWORD tv = 3000; 
+    setsockopt(serverSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#else
     timeval tv{3, 0};
     setsockopt(serverSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 
     sockaddr_in serverAddress{};
     serverAddress.sin_family = AF_INET;
@@ -117,13 +140,13 @@ string findServer() {
     ip_mreq mreq{};
     inet_pton(AF_INET, "224.0.0.167", &mreq.imr_multiaddr);
     mreq.imr_interface.s_addr = INADDR_ANY;
-    setsockopt(serverSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+    setsockopt(serverSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*)&mreq, sizeof(mreq));
 
     char buf[2048];
     sockaddr_in from{};
     socklen_t len = sizeof(from);
-    ssize_t n = recvfrom(serverSocket, buf, sizeof(buf), 0, (sockaddr*)&from, &len);
-    close(serverSocket);
+    int n = recvfrom(serverSocket, buf, sizeof(buf), 0, (sockaddr*)&from, &len);
+    CLOSE_SOCKET(serverSocket);
 
     if (n <= 0) return "";
     char ip[INET_ADDRSTRLEN];
@@ -135,8 +158,8 @@ void send_file_backend(const string& filepath) {
     string ip = findServer();
     if (ip.empty()) return;
 
-    int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (clientSocket < 0) return;
+    SOCKET_T clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket == INVALID_SOCKET) return;
 
     sockaddr_in serverAddress{};
     serverAddress.sin_family = AF_INET;
@@ -144,35 +167,35 @@ void send_file_backend(const string& filepath) {
     serverAddress.sin_addr.s_addr = inet_addr(ip.c_str());
 
     if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
-        close(clientSocket);
+        CLOSE_SOCKET(clientSocket);
         return;
     }
 
     ifstream file(filepath, ios::binary | ios::ate);
     if (!file.is_open()){
-        close(clientSocket);
+        CLOSE_SOCKET(clientSocket);
         return;
     }
     streamsize file_size = file.tellg();
     file.seekg(0, ios::beg);
 
     string filename = std::filesystem::path(filepath).filename().string();
-    uint32_t filename_len = filename.size();
-    send(clientSocket, &filename_len, sizeof(filename_len), 0);
+    uint32_t filename_len = (uint32_t)filename.size();
+    send(clientSocket, (char*)&filename_len, sizeof(filename_len), 0);
     send(clientSocket, filename.c_str(), filename_len, 0);
-    send(clientSocket, &file_size, sizeof(file_size), 0);
+    send(clientSocket, (char*)&file_size, sizeof(file_size), 0);
 
     char buffer[8192];
     while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0 ){
         streamsize bytes_to_send = file.gcount();
-        send(clientSocket, buffer, bytes_to_send, 0);
+        send(clientSocket, buffer, (int)bytes_to_send, 0);
     }
 
-    close(clientSocket);
+    CLOSE_SOCKET(clientSocket);
 }
 
 // =========================================================================
-// 2. This is front end
+// Frontend App
 // =========================================================================
 class AppleEcosystemApp : public QMainWindow {
 public:
@@ -180,7 +203,6 @@ public:
         setupUI();
         initConnections();
 
-        // تشغيل الخدمات في الخلفية
         std::thread(announce_server).detach();
         std::thread(start_receiver_loop).detach();
     }
@@ -288,8 +310,37 @@ private:
 };
 
 int main(int argc, char *argv[]) {
+#if defined(_WIN32)
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
+#if defined(Q_OS_ANDROID)
+    try {
+        QJniObject activity = QJniObject::callStaticObjectMethod("org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+        if (activity.isValid()) {
+            QJniObject context = activity.callObjectMethod("getApplicationContext", "()Landroid/content/Context;");
+            if (context.isValid()) {
+                QJniObject wifiManager = context.callObjectMethod("getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", QJniObject::getStaticObjectMethod("android/content/Context", "WIFI_SERVICE", "Ljava/lang/String;").object());
+                if (wifiManager.isValid()) {
+                    QJniObject multicastLock = wifiManager.callObjectMethod("createMulticastLock", "(Ljava/lang/String;)Landroid/net/wifi/WifiManager$MulticastLock;", QJniObject::fromString("EcosystemMulticastLock").object());
+                    if (multicastLock.isValid()) {
+                        multicastLock.callMethod<void>("acquire");
+                    }
+                }
+            }
+        }
+    } catch (...) {}
+#endif
+
     QApplication app(argc, argv);
     AppleEcosystemApp window;
     window.show();
-    return app.exec();
+    int result = app.exec();
+
+#if defined(_WIN32)
+    WSACleanup();
+#endif
+
+    return result;
 }
